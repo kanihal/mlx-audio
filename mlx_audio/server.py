@@ -8,11 +8,13 @@ It offers an OpenAI-compatible API for Audio completions and model management.
 import argparse
 import asyncio
 import base64
+import gc
 import inspect
 import io
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 import webbrowser
@@ -92,24 +94,75 @@ def sanitize_for_json(obj: Any) -> Any:
 class ModelProvider:
     def __init__(self):
         self.models: Dict[str, Dict[str, Any]] = {}
-        self.lock = asyncio.Lock()
+        self.last_used_at: Dict[str, float] = {}
+        self.lock = threading.RLock()
 
     def load_model(self, model_name: str):
-        if model_name not in self.models:
-            self.models[model_name] = load_model(model_name)
+        with self.lock:
+            if model_name not in self.models:
+                self.models[model_name] = load_model(model_name)
+            self.last_used_at[model_name] = time.monotonic()
 
-        return self.models[model_name]
+            return self.models[model_name]
 
     async def remove_model(self, model_name: str) -> bool:
-        async with self.lock:
+        with self.lock:
             if model_name in self.models:
                 del self.models[model_name]
+                self.last_used_at.pop(model_name, None)
+                _release_mlx_memory()
                 return True
             return False
 
     async def get_available_models(self):
-        async with self.lock:
+        with self.lock:
             return list(self.models.keys())
+
+    def unload_idle_models(self, idle_after_s: float) -> list[str]:
+        if idle_after_s <= 0:
+            return []
+
+        cutoff = time.monotonic() - idle_after_s
+        with self.lock:
+            idle_models = [
+                model_name
+                for model_name, last_used_at in self.last_used_at.items()
+                if last_used_at <= cutoff and model_name in self.models
+            ]
+            for model_name in idle_models:
+                del self.models[model_name]
+                self.last_used_at.pop(model_name, None)
+
+        if idle_models:
+            _release_mlx_memory()
+
+        return idle_models
+
+
+def _release_mlx_memory() -> None:
+    synchronize = getattr(mx, "synchronize", None)
+    if callable(synchronize):
+        synchronize()
+    gc.collect()
+    mx.clear_cache()
+
+
+def _get_idle_unload_seconds() -> float:
+    raw = os.getenv("MLX_AUDIO_IDLE_UNLOAD_SECONDS", "1800")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1800.0
+
+
+def _unload_idle_models_from_broker() -> None:
+    idle_after_s = _get_idle_unload_seconds()
+    if idle_after_s <= 0:
+        return
+
+    unloaded = model_provider.unload_idle_models(idle_after_s)
+    for model_name in unloaded:
+        print(f"Unloaded idle model after {idle_after_s:g}s: {model_name}")
 
 
 app = FastAPI()
@@ -823,7 +876,7 @@ class SeparationExecutionAdapter(BaseModelExecutionAdapter):
 def get_inference_broker() -> InferenceBroker:
     global INFERENCE_BROKER
     if INFERENCE_BROKER is None:
-        broker = InferenceBroker()
+        broker = InferenceBroker(idle_callback=_unload_idle_models_from_broker)
         broker.register_adapter("stt", STTExecutionAdapter())
         broker.register_adapter("tts", TTSExecutionAdapter())
         broker.register_adapter("separation", SeparationExecutionAdapter())
@@ -2037,6 +2090,15 @@ def main():
             "Overrides $MLX_AUDIO_TTS_MAX_BATCH_SIZE."
         ),
     )
+    parser.add_argument(
+        "--idle-unload-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Unload cached models after this many idle seconds. "
+            "Defaults to 1800 via $MLX_AUDIO_IDLE_UNLOAD_SECONDS. Use 0 to disable."
+        ),
+    )
 
     args = parser.parse_args()
     if args.realtime_model:
@@ -2049,6 +2111,8 @@ def main():
         os.environ["MLX_AUDIO_VAD_MODEL"] = args.vad_model
     if args.tts_max_batch_size is not None:
         os.environ["MLX_AUDIO_TTS_MAX_BATCH_SIZE"] = str(args.tts_max_batch_size)
+    if args.idle_unload_seconds is not None:
+        os.environ["MLX_AUDIO_IDLE_UNLOAD_SECONDS"] = str(args.idle_unload_seconds)
 
     setup_cors(app, args.allowed_origins)
 

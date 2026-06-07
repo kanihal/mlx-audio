@@ -6,7 +6,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 
 @dataclass
@@ -129,8 +129,13 @@ class InferenceBroker:
         self,
         *,
         idle_poll_s: float = 0.1,
+        idle_callback: Optional[Callable[[], None]] = None,
+        idle_callback_interval_s: float = 1.0,
     ):
         self.idle_poll_s = idle_poll_s
+        self.idle_callback = idle_callback
+        self.idle_callback_interval_s = max(idle_poll_s, idle_callback_interval_s)
+        self._last_idle_callback_at = 0.0
         self._requests: "queue.Queue[Optional[InferenceRequest]]" = queue.Queue()
         self._adapters: dict[str, ModelExecutionAdapter] = {}
         self._continuous_sessions: dict[Any, ContinuousBatchSession] = {}
@@ -211,6 +216,7 @@ class InferenceBroker:
                     continue
 
                 if not pending:
+                    self._maybe_run_idle_callback()
                     continue
 
                 request = pending.pop(0)
@@ -245,6 +251,20 @@ class InferenceBroker:
             for session in list(self._continuous_sessions.values()):
                 session.fail(RuntimeError("Inference broker stopped."))
             self._continuous_sessions.clear()
+
+    def _maybe_run_idle_callback(self) -> None:
+        if self.idle_callback is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_idle_callback_at < self.idle_callback_interval_s:
+            return
+
+        self._last_idle_callback_at = now
+        try:
+            self.idle_callback()
+        except Exception:  # pragma: no cover - defensive idle hook guard
+            traceback.print_exc()
 
     def _fill_pending(self, pending: list[InferenceRequest], *, block: bool) -> None:
         try:
