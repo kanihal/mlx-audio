@@ -56,6 +56,55 @@ def test_list_models_with_data(client, mock_model_provider):
     assert data["data"][1]["id"] == "model2"
 
 
+def test_list_models_with_advertised_models(client, mock_model_provider, monkeypatch):
+    monkeypatch.setenv(
+        "MLX_AUDIO_ADVERTISED_MODELS",
+        "mlx-community/parakeet-tdt-0.6b-v3, mlx-community/Kokoro-82M-bf16",
+    )
+    mock_model_provider.get_available_models = AsyncMock(return_value=[])
+
+    response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    assert [model["id"] for model in data["data"]] == [
+        "mlx-community/parakeet-tdt-0.6b-v3",
+        "mlx-community/Kokoro-82M-bf16",
+    ]
+
+
+def test_list_models_merges_advertised_and_loaded_models(
+    client, mock_model_provider, monkeypatch
+):
+    monkeypatch.setenv(
+        "MLX_AUDIO_ADVERTISED_MODELS",
+        "model1, model2, model1",
+    )
+    mock_model_provider.get_available_models = AsyncMock(
+        return_value=["model2", "model3"]
+    )
+
+    response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert [model["id"] for model in response.json()["data"]] == [
+        "model1",
+        "model2",
+        "model3",
+    ]
+
+
+def test_list_models_accepts_double_slash_path(client, mock_model_provider, monkeypatch):
+    monkeypatch.setenv("MLX_AUDIO_ADVERTISED_MODELS", "model1")
+    mock_model_provider.get_available_models = AsyncMock(return_value=[])
+
+    response = client.get("/v1//models", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert [model["id"] for model in response.json()["data"]] == ["model1"]
+
+
 def test_add_model(client, mock_model_provider):
     # Test that the add_model endpoint
     response = client.post("/v1/models?model_name=test_model")
