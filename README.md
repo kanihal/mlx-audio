@@ -12,6 +12,7 @@ The best audio processing library built on Apple's MLX framework, providing fast
 
 ## Table of Contents
 
+- [Fork Changes](#fork-changes)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -24,6 +25,16 @@ The best audio processing library built on Apple's MLX framework, providing fast
 - [License](#license)
 - [Citation](#citation)
 - [Acknowledgements](#acknowledgements)
+
+## Fork Changes
+
+This fork carries Nuvoread-focused server and TTS fixes on top of upstream `Blaizzy/mlx-audio`:
+
+- Advertises configured speech models through `/v1/models` using `MLX_AUDIO_ADVERTISED_MODELS` or `MLX_AUDIO_MODELS`, so clients can discover the intended STT and TTS models without loading them first.
+- Adds server idle model unload support with `--idle-unload-seconds` and `MLX_AUDIO_IDLE_UNLOAD_SECONDS`.
+- Limits idle unload to TTS models only. STT models stay loaded once used, including realtime transcription models.
+- Adds server tests for model advertisement, idle unload behavior, and inference broker idle callbacks.
+- Fixes SineGen length alignment in Kokoro and KittenTTS ISTFTNet paths, with regression coverage.
 
 ## Features
 
