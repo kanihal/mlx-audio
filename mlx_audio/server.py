@@ -65,6 +65,21 @@ from mlx_audio.tts.continuous import TTSBatchItem, TTSBatchOptions
 from mlx_audio.utils import load_model
 
 
+def _get_advertised_models() -> List[str]:
+    raw_models = os.getenv("MLX_AUDIO_ADVERTISED_MODELS") or os.getenv(
+        "MLX_AUDIO_MODELS", ""
+    )
+    models = []
+    seen = set()
+    for model in raw_models.replace("\n", ",").split(","):
+        model = model.strip()
+        if not model or model in seen:
+            continue
+        models.append(model)
+        seen.add(model)
+    return models
+
+
 def sanitize_for_json(obj: Any) -> Any:
     """Recursively sanitize NaN, Infinity, and -Infinity values for JSON serialization."""
     # Handle dataclasses
@@ -927,11 +942,22 @@ async def root():
 
 
 @app.get("/v1/models")
+@app.get("/v1/models/")
+@app.get("/v1//models")
+@app.get("/v1//models/")
 async def list_models():
     """
     Get list of models - provided in OpenAI API compliant format.
     """
-    models = await model_provider.get_available_models()
+    loaded_models = await model_provider.get_available_models()
+    models = []
+    seen = set()
+    for model in [*_get_advertised_models(), *loaded_models]:
+        if model in seen:
+            continue
+        models.append(model)
+        seen.add(model)
+
     models_data = []
     for model in models:
         models_data.append(
