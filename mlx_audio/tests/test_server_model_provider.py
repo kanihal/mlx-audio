@@ -8,10 +8,28 @@ def test_model_provider_retains_warm_model(monkeypatch):
     provider = server.ModelProvider()
     release_calls = []
     monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
-    monkeypatch.setattr(server, "_release_mlx_memory", lambda: release_calls.append(True))
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
 
     model = provider.load_model("model-a")
     provider.last_used_at["model-a"] = time.monotonic() - 10
+
+    assert provider.unload_idle_models(30) == []
+    assert provider.load_model("model-a") is model
+    assert release_calls == []
+
+
+def test_model_provider_retains_idle_untyped_model(monkeypatch):
+    provider = server.ModelProvider()
+    release_calls = []
+    monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
+
+    model = provider.load_model("model-a")
+    provider.last_used_at["model-a"] = time.monotonic() - 31
 
     assert provider.unload_idle_models(30) == []
     assert provider.load_model("model-a") is model
@@ -22,9 +40,11 @@ def test_model_provider_unloads_idle_model(monkeypatch):
     provider = server.ModelProvider()
     release_calls = []
     monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
-    monkeypatch.setattr(server, "_release_mlx_memory", lambda: release_calls.append(True))
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
 
-    provider.load_model("model-a")
+    provider.load_model("model-a", endpoint_kind="tts")
     provider.last_used_at["model-a"] = time.monotonic() - 31
 
     assert provider.unload_idle_models(30) == ["model-a"]
@@ -32,13 +52,48 @@ def test_model_provider_unloads_idle_model(monkeypatch):
     assert release_calls == [True]
 
 
+def test_model_provider_retains_idle_stt_model(monkeypatch):
+    provider = server.ModelProvider()
+    release_calls = []
+    monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
+
+    model = provider.load_model("model-a", endpoint_kind="stt")
+    provider.last_used_at["model-a"] = time.monotonic() - 31
+
+    assert provider.unload_idle_models(30) == []
+    assert provider.load_model("model-a") is model
+    assert release_calls == []
+
+
+def test_model_provider_retains_model_seen_by_stt(monkeypatch):
+    provider = server.ModelProvider()
+    release_calls = []
+    monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
+
+    model = provider.load_model("model-a", endpoint_kind="tts")
+    assert provider.load_model("model-a", endpoint_kind="stt") is model
+    provider.last_used_at["model-a"] = time.monotonic() - 31
+
+    assert provider.unload_idle_models(30) == []
+    assert provider.load_model("model-a") is model
+    assert release_calls == []
+
+
 def test_model_provider_idle_unload_can_be_disabled(monkeypatch):
     provider = server.ModelProvider()
     release_calls = []
     monkeypatch.setattr(server, "load_model", lambda model_name: {"id": model_name})
-    monkeypatch.setattr(server, "_release_mlx_memory", lambda: release_calls.append(True))
+    monkeypatch.setattr(
+        server, "_release_mlx_memory", lambda: release_calls.append(True)
+    )
 
-    provider.load_model("model-a")
+    provider.load_model("model-a", endpoint_kind="tts")
     provider.last_used_at["model-a"] = time.monotonic() - 3600
 
     assert provider.unload_idle_models(0) == []
@@ -57,10 +112,10 @@ def test_model_provider_reloads_after_idle_unload(monkeypatch):
 
     monkeypatch.setattr(server, "load_model", load)
 
-    first = provider.load_model("model-a")
+    first = provider.load_model("model-a", endpoint_kind="tts")
     provider.last_used_at["model-a"] = time.monotonic() - 31
     assert provider.unload_idle_models(30) == ["model-a"]
 
-    second = provider.load_model("model-a")
+    second = provider.load_model("model-a", endpoint_kind="tts")
     assert first != second
     assert loads == ["model-a", "model-a"]

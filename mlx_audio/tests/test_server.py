@@ -95,7 +95,9 @@ def test_list_models_merges_advertised_and_loaded_models(
     ]
 
 
-def test_list_models_accepts_double_slash_path(client, mock_model_provider, monkeypatch):
+def test_list_models_accepts_double_slash_path(
+    client, mock_model_provider, monkeypatch
+):
     monkeypatch.setenv("MLX_AUDIO_ADVERTISED_MODELS", "model1")
     mock_model_provider.get_available_models = AsyncMock(return_value=[])
 
@@ -172,7 +174,10 @@ def test_tts_speech(client, mock_model_provider):
         == "attachment; filename=speech.mp3"
     )
 
-    mock_model_provider.load_model.assert_any_call("test_tts_model")
+    mock_model_provider.load_model.assert_any_call(
+        "test_tts_model",
+        endpoint_kind="tts",
+    )
     mock_tts_model.generate.assert_called_once()
 
     args, kwargs = mock_tts_model.generate.call_args
@@ -205,7 +210,8 @@ def test_tts_speech_bad_model_returns_404_not_silent_200(client, mock_model_prov
     model synchronously before returning the response.
     """
 
-    def _raise(model_name):
+    def _raise(model_name, **kwargs):
+        del kwargs
         raise _hf_repo_not_found(model_name)
 
     mock_model_provider.load_model = MagicMock(side_effect=_raise)
@@ -230,7 +236,8 @@ def test_tts_speech_bad_model_returns_404_not_silent_200(client, mock_model_prov
 def test_tts_speech_load_failure_returns_500(client, mock_model_provider):
     """Non-HF load failures should surface as 500 with a JSON detail body."""
 
-    def _raise(model_name):
+    def _raise(model_name, **kwargs):
+        del kwargs
         raise RuntimeError("checkpoint is corrupted")
 
     mock_model_provider.load_model = MagicMock(side_effect=_raise)
@@ -248,7 +255,8 @@ def test_tts_speech_load_failure_returns_500(client, mock_model_provider):
 def test_stt_transcriptions_bad_model_returns_404(client, mock_model_provider):
     """Same silent-200 hazard applies to the default ndjson streaming response."""
 
-    def _raise(model_name):
+    def _raise(model_name, **kwargs):
+        del kwargs
         raise _hf_repo_not_found(model_name)
 
     mock_model_provider.load_model = MagicMock(side_effect=_raise)
@@ -297,7 +305,10 @@ def test_stt_transcriptions(client, mock_model_provider):
     assert response.status_code == 200
     assert response.json() == {"text": "This is a test transcription."}
 
-    mock_model_provider.load_model.assert_any_call("test_stt_model")
+    mock_model_provider.load_model.assert_any_call(
+        "test_stt_model",
+        endpoint_kind="stt",
+    )
     mock_stt_model.generate.assert_called_once()
 
     assert mock_stt_model.generate.call_args[0][0].startswith("/tmp/")

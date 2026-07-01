@@ -110,13 +110,18 @@ class ModelProvider:
     def __init__(self):
         self.models: Dict[str, Dict[str, Any]] = {}
         self.last_used_at: Dict[str, float] = {}
+        self.model_endpoint_kinds: Dict[str, set[str]] = {}
         self.lock = threading.RLock()
 
-    def load_model(self, model_name: str):
+    def load_model(self, model_name: str, *, endpoint_kind: str | None = None):
         with self.lock:
             if model_name not in self.models:
                 self.models[model_name] = load_model(model_name)
             self.last_used_at[model_name] = time.monotonic()
+            if endpoint_kind is not None:
+                self.model_endpoint_kinds.setdefault(model_name, set()).add(
+                    endpoint_kind
+                )
 
             return self.models[model_name]
 
@@ -125,6 +130,7 @@ class ModelProvider:
             if model_name in self.models:
                 del self.models[model_name]
                 self.last_used_at.pop(model_name, None)
+                self.model_endpoint_kinds.pop(model_name, None)
                 _release_mlx_memory()
                 return True
             return False
@@ -142,16 +148,23 @@ class ModelProvider:
             idle_models = [
                 model_name
                 for model_name, last_used_at in self.last_used_at.items()
-                if last_used_at <= cutoff and model_name in self.models
+                if last_used_at <= cutoff
+                and model_name in self.models
+                and self._can_idle_unload(model_name)
             ]
             for model_name in idle_models:
                 del self.models[model_name]
                 self.last_used_at.pop(model_name, None)
+                self.model_endpoint_kinds.pop(model_name, None)
 
         if idle_models:
             _release_mlx_memory()
 
         return idle_models
+
+    def _can_idle_unload(self, model_name: str) -> bool:
+        endpoint_kinds = self.model_endpoint_kinds.get(model_name, set())
+        return "tts" in endpoint_kinds and "stt" not in endpoint_kinds
 
 
 def _release_mlx_memory() -> None:
@@ -177,7 +190,7 @@ def _unload_idle_models_from_broker() -> None:
 
     unloaded = model_provider.unload_idle_models(idle_after_s)
     for model_name in unloaded:
-        print(f"Unloaded idle model after {idle_after_s:g}s: {model_name}")
+        print(f"Unloaded idle TTS model after {idle_after_s:g}s: {model_name}")
 
 
 app = FastAPI()
@@ -304,11 +317,13 @@ class SeparationTaskPayload:
     steps: int
 
 
-def _load_model_for_inference(model_name: str):
-    return model_provider.load_model(model_name)
+def _load_model_for_inference(model_name: str, *, endpoint_kind: str | None = None):
+    return model_provider.load_model(model_name, endpoint_kind=endpoint_kind)
 
 
-async def _preflight_model_load(model_name: str) -> None:
+async def _preflight_model_load(
+    model_name: str, *, endpoint_kind: str | None = None
+) -> None:
     """Load ``model_name`` synchronously and translate failures into HTTPException.
 
     Routes that return a ``StreamingResponse`` commit the HTTP status + headers
@@ -318,7 +333,11 @@ async def _preflight_model_load(model_name: str) -> None:
     response. Warm models are a no-op (``ModelProvider.load_model`` is cached).
     """
     try:
-        await asyncio.to_thread(_load_model_for_inference, model_name)
+        await asyncio.to_thread(
+            _load_model_for_inference,
+            model_name,
+            endpoint_kind=endpoint_kind,
+        )
     except HTTPException:
         raise
     except RepositoryNotFoundError as exc:
@@ -345,7 +364,10 @@ class STTExecutionAdapter(BaseModelExecutionAdapter):
         audio_write(tmp_path, payload.audio, payload.sample_rate)
 
         try:
-            stt_model = _load_model_for_inference(request.model_name)
+            stt_model = _load_model_for_inference(
+                request.model_name,
+                endpoint_kind="stt",
+            )
             gen_kwargs = payload.request.model_dump(
                 exclude={"model"}, exclude_none=True
             )
@@ -501,7 +523,10 @@ class TTSExecutionAdapter(BaseModelExecutionAdapter):
     def _get_model_for_request(self, request: InferenceRequest):
         model = getattr(request, self._REQUEST_MODEL_ATTR, None)
         if model is None:
-            model = _load_model_for_inference(request.model_name)
+            model = _load_model_for_inference(
+                request.model_name,
+                endpoint_kind="tts",
+            )
             setattr(request, self._REQUEST_MODEL_ATTR, model)
         return model
 
@@ -1018,7 +1043,7 @@ async def tts_speech(payload: SpeechRequest, request: Request):
                 detail=f"Reference audio file not found: {payload.ref_audio}",
             )
 
-    await _preflight_model_load(payload.model)
+    await _preflight_model_load(payload.model, endpoint_kind="tts")
 
     handle = get_inference_broker().submit(
         endpoint_kind="tts",
@@ -1124,7 +1149,7 @@ async def stt_transcriptions(
     audio, sr = audio_read(tmp, always_2d=False)
     tmp.close()
 
-    await _preflight_model_load(payload.model)
+    await _preflight_model_load(payload.model, endpoint_kind="stt")
 
     handle = get_inference_broker().submit(
         endpoint_kind="stt",
@@ -1321,7 +1346,7 @@ async def stt_realtime_transcriptions(websocket: WebSocket):
 
         # Load the STT model
         print("Loading STT model...")
-        stt_model = model_provider.load_model(model_name)
+        stt_model = model_provider.load_model(model_name, endpoint_kind="stt")
         print("STT model loaded successfully")
 
         # Initialize WebRTC VAD for speech detection
@@ -1681,7 +1706,7 @@ async def realtime_ws(websocket: WebSocket):
         await websocket.close()
         return
     try:
-        model = model_provider.load_model(model_name)
+        model = model_provider.load_model(model_name, endpoint_kind="stt")
     except Exception as e:
         await send_error(f"load failed: {e}")
         await websocket.close()
@@ -1810,7 +1835,10 @@ async def realtime_ws(websocket: WebSocket):
                 target_model_name = _resolve_realtime_model_name(resolved_model)
                 if target_model_name and target_model_name != model_name:
                     try:
-                        model = model_provider.load_model(target_model_name)
+                        model = model_provider.load_model(
+                            target_model_name,
+                            endpoint_kind="stt",
+                        )
                     except Exception as e:
                         await send_error(f"load failed: {e}")
                         continue
@@ -2121,7 +2149,7 @@ def main():
         type=float,
         default=None,
         help=(
-            "Unload cached models after this many idle seconds. "
+            "Unload cached TTS models after this many idle seconds. "
             "Defaults to 1800 via $MLX_AUDIO_IDLE_UNLOAD_SECONDS. Use 0 to disable."
         ),
     )
